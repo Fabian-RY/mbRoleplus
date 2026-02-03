@@ -116,6 +116,8 @@ def validation(id, database, table, input_file, output_file, logfile, field):
 			- Whether the path given for database exists
 			- Whether the table given exists in the database
 			- Whether the ID is present in the table
+            - Whether the input file exists
+            - Whether the output file can be created
     """
     # Set a new logger to Identify this section in the log
     logger = _set_logger(validation.__name__)
@@ -153,11 +155,15 @@ def validation(id, database, table, input_file, output_file, logfile, field):
         logger.critical(f"Source {id} not found in {table} in column {field}. Pherhaps a typo?")
         return False
     logger.info(f" Source {id} found")
+
+    # Check if input file exists
     if (not os.path.exists(input_file)):
         logger.critical( f"Input file: {input_file} not found. Check typos or correct the path")
     logging.info(f" Input file {input_file} found")
+
+    # Check if output file could be created
     if (not os.path.exists(os.path.dirname(output_file))):
-        logger.critical( f"Output folder: {input_file} not found. Check typos or correct the path")
+        logger.critical( f" Output folder {os.path.dirname(output_file)} not found. Check typos or correct the path")
     logging.info(f" Output file {output_file} can be created")
 
     logger.info(" Validation finished, proceeding with conversion")
@@ -173,12 +179,9 @@ def convert(input, database, table, id, field):
 
         The table schema is simple: each row contains inchikey, ID and database.
         Searching by ID we obtain the inchikey, and using the inchikey we can 
-        recieve ALL the metabolites with that inchikey. Then we can filter by database
+        recieve every metabolites with that inchikey. Then we can filter by database
         or use them as they are returned.
-
-
     """
-
     logger = _set_logger(convert.__name__)
 
     # Starting connection to the database
@@ -203,39 +206,85 @@ def convert(input, database, table, id, field):
         SQL = SQL_GET_INCHIKEY.format(table, metabolite)
         logging.debug(f" Executing {SQL}")
         results = cursor.execute(SQL).fetchall()
+
+        # Basecase: ID not found in the database, so sqlite3 returns 0
+        # We consider it as unavailable
         if (len(results) == 0):
             logger.warning(f" Metabolite with ID {metabolite} not found")
             unavailable_ids.add(metabolite)
+        # Results found
         else:
-            inchikey = results[0][0]
+            # PySQLite returs a list of tuples, also note that every ID is unique for every
+            # Database, and as the query filters by database there should only be one
+            # This is an asumption, in case there are multiple elements with the same ID, we take the first one
+            # And warn the user. We use the inchikey as common ID
+            if (len(results > 1)):
+                logger.warning(f" Found several metabolites with the same ID {metabolite} in database {database}")
+                logger.warning(f" Taking {results[0]} as conversion ID")
+            # Taking the first element returned (Again, unless the database is wrongly constructed, there shoulbe only one element)
+            inchikey = results[0][0]  
             logger.debug(f" Found inchikey {inchikey} with ID  {metabolite}")
+
+            # Preparing the 
             SQL = SQL_GET_ID_WITH_INCHIKEY.format(table, inchikey, field, id)
             logger.debug(SQL)
-            molecules = cursor.execute(SQL).fetchall()[0][0]
-            if (len(molecules) == 0):
-                # TODO: What happens when there no ID in destination
-                pass
+            data = cursor.execute(SQL).fetchall()
+            if(len(data) > 0):
+                molecules = data[0][0]
+            else: 
+                logger.warning(f"Metabolite {metabolite} found in DDBB; Not found in {id}, however")
+                unavailable_ids.add(metabolite)
+                continue
             founded_ids[metabolite] = molecules
     return (founded_ids, unavailable_ids)
 
 def save_compounds(file, gzipped, compounds):
+    """
+        Saves a one-per-line file with the compounds. Optionally compresses the file using gzip
+    """
     openf = gzip.open if gzipped else open
+
+    # Explicit opening mode as open y gzip.open have different default 
     with (openf(file, "wt")) as fhand:
         list(map(lambda x: print(x, file=fhand, end="\n"), compounds))
 
-
 def main():
+    """
+        The flow of the script is as follows:
+
+        - Parsing arguments (defined in function and help)
+        - Set logger (Logger level can be set by param --loglevel or -ll )
+        - Validate all inputs before execution (good for big conversions and improved robustness)
+        - Parse input file
+        - Convert IDs
+        - Save converted and discarded IDs
+    """
     args = _parse_args()
+
+    # The argument gives a string we have to convert into the different log levels available
+    # In the logging library, beyond that, we alson need to set up the basic logging stuff
+    # and create the root level logging
     loglevel = _parse_loglevel(args.loglevel)
     logging.basicConfig(filename=args.logfile, level=loglevel)
     logger = _set_logger(LOGGER_NAME)
+
+    # Once logging is set, validate input. We want to avoid calculating hundreds of functional enrinchments
+    # Just to fail because file path does not exist nor want to stop half-process due to the table not having the
+    # correct column indicated
     if not validation(args.id, args.database, args.table, args.input, args.output, args.logfile, args.field):
         logger.info("Input commands not valid. Exiting...")
         sys.exit(1)
+
+    # Read the file with the input: one compound per line
     input_compounds = _parse_input_file(args.input,  gz=args.gzipped_input)
+
+    # Conversion
     converted, unavailable = convert(input_compounds, args.database, args.table, args.id, args.field)
     logger.info(f" Found {len(converted.keys())} IDs ({len(converted.keys())/len(input_compounds)}%)")
     logger.info(f" {len(unavailable)} metabolites not found ({len(unavailable)/len(input_compounds)})")
+
+    # Save the compounds: one per line. As the database may not have every possible compound in
+    # existence, we also save a file with discarded compounds
     save_compounds(args.output, args.gzipped_output, set(converted.values()))
     save_compounds(args.discarded_file, False, unavailable)
 
