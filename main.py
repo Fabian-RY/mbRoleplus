@@ -50,22 +50,25 @@ SQL_GET_ID_WITH_INCHIKEY = "Select id from {} where inchikey == \"{}\" AND {} ==
 
 def _parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input","-i", type=str, help="A one-per-line compound file to be converted")
+    parser.add_argument("--input","-i", type=str, help="A one-per-line compound file to be converted", required=True)
     parser.add_argument("--output","-o", type=str, default="/dev/stdout", help="A one-per-line file with the same compounds but converted to the same ID")
-    parser.add_argument("--database","-db",type=str, help="Sqlite3 database with the conversion info")
+    parser.add_argument("--database","-db",type=str, help="Sqlite3 database with the conversion info", required=True)
     parser.add_argument("--table","-t", type=str, default="mbroleplus", help="Table name inside the database to use")
     parser.add_argument("--field","-f", type=str, help="Field in which the sources are stored", default="database")
-    parser.add_argument("--id","-id", type=str, help="ID to convert input to. Must exist into the databse DATABASE column")
+    parser.add_argument("--id","-id", type=str, help="ID to convert input to. Must exist into the databse DATABASE column", required=True)
     parser.add_argument("--gzipped_input","-gzi", type=bool, default=False, help="Whether the input file is gzipped or not. Default: False")
     parser.add_argument("--gzipped_output","-gzo", type=bool, default=False, help="Should the output file be gzipped or not. Default: False")
     parser.add_argument("--logfile","-l",type=str, default="/dev/stdout", help="Where to save the log file. Default: print to stdout")
     parser.add_argument("--loglevel","-ll",type=str, choices=["debug","info","warn","error","critical"], default="info", help="Minimum level to show in the log. Default: Info")
-    parser.add_argument("--discarded_file","-d", type=str, default=".", help="Where the compounds not available to the database should be stored")
+    parser.add_argument("--discarded_file","-d", type=str, default="./discarded.txt", help="Where the compounds not available to the database should be stored")
     return parser.parse_args()
 
 def _parse_loglevel(loglevel):
     """
         Turns loglevel flag into a logging value
+
+        For now, only debug, info and warning are used. Possible values are thos indicated in the argparse
+        function
     """
     if (loglevel == "debug"):
         return logging.DEBUG
@@ -96,18 +99,18 @@ def _set_logger(name):
 	logger = logging.getLogger(name)
 	return logger
 
-def _parse_input_file(file, gz):
+def _parse_input_file(file, gz) -> set:
     """
 		Convert the input files into a set.
 		Assumes every line is a different compound name/ID
 
 		returns a set
     """
-    logger = _set_logger(_parse_input_file.__name__)
+    logger:logging.Logger = _set_logger(_parse_input_file.__name__)
     openf = gzip.open if gz else open
-    with openf(file) as fhand:
+    with openf(file, "rt") as fhand:
         logger.info(f"Parsing file: {file}")
-        input_set = {x.strip("\n") for x in fhand.readlines()}
+        input_set:set = {x.strip("\n") for x in fhand.readlines()}
     return input_set
 
 def validation(id, database, table, input_file, output_file, logfile, field):
@@ -217,10 +220,12 @@ def convert(input, database, table, id, field):
             # PySQLite returs a list of tuples, also note that every ID is unique for every
             # Database, and as the query filters by database there should only be one
             # This is an asumption, in case there are multiple elements with the same ID, we take the first one
-            # And warn the user. We use the inchikey as common ID
-            if (len(results > 1)):
+            # And warn the user. We use the inchikey as common ID, because elements with the same ID should
+            # represent the same molecule (as we query only in one database at time)
+            if (len(results) > 1):
+                logging.debug(results)
                 logger.warning(f" Found several metabolites with the same ID {metabolite} in database {database}")
-                logger.warning(f" Taking {results[0]} as conversion ID")
+                logger.warning(f" Taking {results[0][0]} as conversion ID") # Remember, pysqlite3 returns a list of tuples ALWAYS
             # Taking the first element returned (Again, unless the database is wrongly constructed, there shoulbe only one element)
             inchikey = results[0][0]  
             logger.debug(f" Found inchikey {inchikey} with ID  {metabolite}")
@@ -280,8 +285,8 @@ def main():
 
     # Conversion
     converted, unavailable = convert(input_compounds, args.database, args.table, args.id, args.field)
-    logger.info(f" Found {len(converted.keys())} IDs ({len(converted.keys())/len(input_compounds)}%)")
-    logger.info(f" {len(unavailable)} metabolites not found ({len(unavailable)/len(input_compounds)})")
+    logger.info(f" Found {len(converted.keys())} IDs ({len(converted.keys())/len(input_compounds)*100}%)")
+    logger.info(f" {len(unavailable)} metabolites not found ({len(unavailable)/len(input_compounds)*100})")
 
     # Save the compounds: one per line. As the database may not have every possible compound in
     # existence, we also save a file with discarded compounds
